@@ -155,9 +155,11 @@ class TensorIndexing(IndexedExpr):
     def diff(self, target: TensorIndexing) -> IndexedExpr:
         _check_indices(self.indices, target.indices)
         if target.tensor == self.tensor:
+            if self.tensor.rank == 0:
+                return _One(0).__getitem__(())
             expr: IndexedExpr = Delta(
                 self.indices[0], target.indices[0]
-            )  # Assuming there's at least 1 index
+            )
             for i, j in zip(self.indices[1:], target.indices[1:]):
                 expr = expr * Delta(i, j)
             return expr
@@ -239,3 +241,10 @@ class _Zero(_Tensor):
 
     def __str__(self) -> str:
         return "0"
+
+class _One(_Tensor):
+    def __init__(self, rank: int) -> None:
+        super().__init__(rank)
+
+    def __str__(self) -> str:
+        return "1"
