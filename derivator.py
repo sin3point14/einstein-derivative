@@ -99,9 +99,13 @@ class _IndexedExpr(ABC):
 
     def __repr__(self) -> str:
         return self.__str__()
-    
+
     @abstractmethod
     def replace_indices(self, replacements: dict[Index, Index]) -> None:
+        pass
+
+    @abstractmethod
+    def simplify_deltas(self) -> None:
         pass
 
 
@@ -174,8 +178,53 @@ class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
 
     def __str__(self) -> str:
         return " * ".join([str(op) for op in self.operands])
-    
+
     def replace_indices(self, replacements: dict[Index, Index]) -> None:
+        for o in self.operands:
+            o.replace_indices(replacements)
+
+    def simplify_deltas(self) -> None:
+        dummy_indices = self.get_dummy_indices()
+        deletion_set = set()
+        replacements: dict[Index, Index] = {}
+        reverse_replacements: dict[Index, Index] = {}
+
+        def add_replacement(old: Index, new: Index) -> None:
+            # already have j -> k (replacements), k -> j (reverse_replacements)
+            # adding i(old) -> j(new)
+            # want i -> k (replacements), k -> i (reverse_replacements)
+            if new in replacements:
+                new_replacement = replacements[new]
+                del replacements[new]
+                del reverse_replacements[new_replacement]
+                new = new_replacement
+            # already have i -> j (replacements), j -> i (reverse_replacements)
+            # adding j(old) -> k(new)
+            # want i -> k (replacements), k -> i (reverse_replacements)
+            if old in reverse_replacements:
+                old_reverse_replacement = reverse_replacements[old]
+                del reverse_replacements[old]
+                del replacements[old_reverse_replacement]
+                old = old_reverse_replacement
+            replacements[old] = new
+            reverse_replacements[new] = old
+
+        for n, o in enumerate(self.operands):
+            if isinstance(o, Delta):
+                deletion = False
+                if o.i1 in dummy_indices:
+                    add_replacement(o.i1, o.i2)
+                    deletion = True
+                if not deletion and o.i2 in dummy_indices:
+                    add_replacement(o.i2, o.i1)
+                    deletion = True
+                if deletion:
+                    deletion_set.add(n)
+
+        self.operands = [
+            i for j, i in enumerate(self.operands) if j not in deletion_set
+        ]
+
         for o in self.operands:
             o.replace_indices(replacements)
 
@@ -235,11 +284,19 @@ class _Sum(_IndexedExpr, metaclass=utils.NoPublicConstructor):
         for o in self.operands:
             o.replace_indices(replacements)
 
+    def simplify_deltas(self) -> None:
+        for o in self.operands:
+            o.simplify_deltas()
 
-@dataclass
+
 class Delta(_IndexedExpr):
     i1: Index
     i2: Index
+
+    def __init__(self, i1: Index, i2: Index):
+        assert i1 != i2, f"Delta index({i1}) cannot be repeated"
+        self.i1 = i1
+        self.i2 = i2
 
     def get_free_indices(self) -> set[Index]:
         if self.i1 == self.i2:
@@ -272,6 +329,10 @@ class Delta(_IndexedExpr):
                 self.i1 = new
             if self.i2 == old:
                 self.i2 = new
+
+    def simplify_deltas(self) -> None:
+        return
+
 
 @dataclass
 class _TensorIndexing(_IndexedExpr):
@@ -313,12 +374,15 @@ class _TensorIndexing(_IndexedExpr):
 
     def get_children(self) -> list[_IndexedExpr]:
         return []
-    
+
     def replace_indices(self, replacements: dict[Index, Index]) -> None:
         for old, new in replacements.items():
             for n in range(len(self.indices)):
                 if self.indices[n] == old:
                     self.indices[n] = new
+
+    def simplify_deltas(self) -> None:
+        return
 
 
 class _Equality:
@@ -333,9 +397,7 @@ class _Equality:
         self.free_indices = indices  # we don't really need this i think
 
 
-def _make_indexed(
-    T: Callable[[int], _Tensor], indices: list[Index]
-) -> _IndexedExpr:
+def _make_indexed(T: Callable[[int], _Tensor], indices: list[Index]) -> _IndexedExpr:
     return T(len(indices)).__getitem__(tuple(indices))
 
 
@@ -356,7 +418,10 @@ class _Tensor(ABC):
     def diff(self, x: _TensorIndexing) -> _IndexedExpr:
         if not self.value:
             raise ValueError("Tensor has not been assigned an expr")
-        return self.value.rhs.diff(x)
+        diff_expr = self.value.rhs.diff(x)
+        if Context.simplify_deltas:
+            diff_expr.simplify_deltas()
+        return diff_expr
 
     @abstractmethod
     def __str__(self) -> str:
