@@ -1,12 +1,16 @@
 from typing import Union, Tuple, Any, Callable
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import copy
+import functools
+import operator
 
 _used_names: dict[int, str] = dict()
 
 
 class Context:
-    remove_zeros: bool = False
+    remove_zeros_and_ones: bool = True
+    simplify_deltas: bool = False
 
 
 def _add_name(obj: Any, name: str) -> None:
@@ -76,14 +80,19 @@ class _IndexedExpr(ABC):
         pass
 
     def __mul__(self, other: _IndexedExpr) -> _IndexedExpr:
-        if Context.remove_zeros and (
-            (isinstance(self, _TensorIndexing) and isinstance(self.tensor, _Zero))
-            or (isinstance(other, _TensorIndexing) and isinstance(other.tensor, _Zero))
-        ):
-            self_free = self.get_free_indices()
-            other_free = other.get_free_indices()
-            return _make_indexed(_Zero, tuple(self_free ^ other_free))
-        return _Product(self, other)
+        if Context.remove_zeros_and_ones:
+            if (
+                (isinstance(self, _TensorIndexing) and isinstance(self.tensor, _Zero))
+                or (isinstance(other, _TensorIndexing) and isinstance(other.tensor, _Zero))
+            ):
+                self_free = self.get_free_indices()
+                other_free = other.get_free_indices()
+                return _make_indexed(_Zero, tuple(self_free ^ other_free))
+            if isinstance(self, _TensorIndexing) and isinstance(self.tensor, _One):
+                return other
+            if isinstance(other, _TensorIndexing) and isinstance(other.tensor, _One):
+                return self
+        return _Product([self, other])
 
     def __add__(self, other: _IndexedExpr) -> _IndexedExpr:
         self_free = self.get_free_indices()
@@ -92,7 +101,7 @@ class _IndexedExpr(ABC):
             self_free == other_free
         ), f"LHS({self_free}) and RHS({other_free}) free indices don't match"
 
-        if Context.remove_zeros:
+        if Context.remove_zeros_and_ones:
             self_zero = isinstance(self, _TensorIndexing) and isinstance(
                 self.tensor, _Zero
             )
@@ -105,7 +114,7 @@ class _IndexedExpr(ABC):
                 return other
             if other_zero:
                 return self
-        return _Sum(self, other)
+        return _Sum([self, other])
 
     @abstractmethod
     def __str__(self) -> str:
@@ -117,38 +126,52 @@ class _IndexedExpr(ABC):
 
 @dataclass
 class _Product(_IndexedExpr):
-    lhs: _IndexedExpr
-    rhs: _IndexedExpr
+    # this will always have size >= 2
+    operands: list[_IndexedExpr]
 
     def get_free_indices(self) -> set[Index]:
-        lhs_indices, rhs_indices = (
-            self.lhs.get_free_indices(),
-            self.rhs.get_free_indices(),
-        )
-        return lhs_indices ^ rhs_indices
+        all_free_indices = []
+        for o in self.operands:
+            all_free_indices += list(o.get_free_indices())
+        free_indices = _get_free_indices(tuple(all_free_indices))
+        return free_indices
 
     def diff(self, target: _TensorIndexing) -> _IndexedExpr:
-        t1 = self.lhs * self.rhs.diff(target)
-        t2 = self.lhs.diff(target) * self.rhs
-        return t1 + t2
+        # I am 99% sure that target will never have any index repeated from the free indices
+        new_indices = tuple(self.get_free_indices() | target.get_free_indices())
+        return sum(
+            (
+                functools.reduce(
+                    operator.mul,
+                    self.operands[:i] + [op.diff(target)] + self.operands[i + 1 :],
+                    _One()[()],
+                )
+                for i, op in enumerate(self.operands)
+            ),
+            _make_indexed(_Zero, new_indices),
+        )
 
     def __str__(self) -> str:
-        return f"{self.lhs} * {self.rhs}"
+        return " * ".join([str(op) for op in self.operands])
 
 
 @dataclass
 class _Sum(_IndexedExpr):
-    lhs: _IndexedExpr
-    rhs: _IndexedExpr
+    # this will always have size >= 2
+    operands: list[_IndexedExpr]
 
     def get_free_indices(self) -> set[Index]:
-        return self.lhs.get_free_indices()
+        return self.operands[0].get_free_indices()
 
     def diff(self, target: _TensorIndexing) -> _IndexedExpr:
+        new_indices = tuple(self.get_free_indices() | target.get_free_indices())
+        return sum(
+            (op.diff(target) for op in self.operands), _make_indexed(_Zero, new_indices)
+        )
         return self.lhs.diff(target) + self.rhs.diff(target)
 
     def __str__(self) -> str:
-        return f"({self.lhs} + {self.rhs})"
+        return " + ".join([str(op) for op in self.operands])
 
 
 @dataclass
@@ -184,7 +207,7 @@ class _TensorIndexing(_IndexedExpr):
         _check_indices(self.indices, target.indices)
         if target.tensor == self.tensor:
             if self.tensor.rank == 0:
-                return _make_indexed(_One, ())
+                return _One()[()]
             expr: _IndexedExpr = _Delta(self.indices[0], target.indices[0])
             for i, j in zip(self.indices[1:], target.indices[1:]):
                 expr = expr * _Delta(i, j)
@@ -282,8 +305,8 @@ class _Zero(_Tensor):
 
 
 class _One(_Tensor):
-    def __init__(self, rank: int) -> None:
-        super().__init__(rank)
+    def __init__(self) -> None:
+        super().__init__(0)
 
     def __str__(self) -> str:
         return "1"
