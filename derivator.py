@@ -42,13 +42,13 @@ class Index:
         return self.__str__()
 
 
-def _tuplify_index(indices: Union[Index, Tuple[Index, ...]]) -> Tuple[Index, ...]:
+def _listify_index(indices: Union[Index, Tuple[Index, ...]]) -> list[Index]:
     if isinstance(indices, Index):
         indices = (indices,)
-    return indices
+    return list(indices)
 
 
-def _get_index_counts(indices: Tuple[Index, ...]) -> dict[Index, int]:
+def _get_index_counts(indices: list[Index]) -> dict[Index, int]:
     index_counts: dict[Index, int] = {}
     for i in indices:
         index_counts.setdefault(i, 0)
@@ -56,17 +56,17 @@ def _get_index_counts(indices: Tuple[Index, ...]) -> dict[Index, int]:
     return index_counts
 
 
-def _get_free_indices(indices: Tuple[Index, ...]) -> set[Index]:
+def _get_free_indices(indices: list[Index]) -> set[Index]:
     index_counts = _get_index_counts(indices)
     return {key for key, val in index_counts.items() if val == 1}
 
 
-def _get_dummy_indices(indices: Tuple[Index, ...]) -> set[Index]:
+def _get_dummy_indices(indices: list[Index]) -> set[Index]:
     index_counts = _get_index_counts(indices)
     return {key for key, val in index_counts.items() if val != 1}
 
 
-def _check_indices_diff(ours: Tuple[Index, ...], target: Tuple[Index, ...]) -> None:
+def _check_indices_diff(ours: list[Index], target: list[Index]) -> None:
     common_indices = set(ours) & set(target)
     if common_indices:
         raise ValueError(
@@ -99,6 +99,10 @@ class _IndexedExpr(ABC):
 
     def __repr__(self) -> str:
         return self.__str__()
+    
+    @abstractmethod
+    def replace_indices(self, replacements: dict[Index, Index]) -> None:
+        pass
 
 
 class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
@@ -123,7 +127,7 @@ class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
             ):
                 self_free = lhs.get_free_indices()
                 other_free = rhs.get_free_indices()
-                return _make_indexed(_Zero, tuple(self_free ^ other_free))
+                return _make_indexed(_Zero, list(self_free ^ other_free))
             if isinstance(lhs, _TensorIndexing) and isinstance(lhs.tensor, _One):
                 return rhs
             if isinstance(rhs, _TensorIndexing) and isinstance(rhs.tensor, _One):
@@ -141,7 +145,7 @@ class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
         all_free_indices = []
         for o in self.operands:
             all_free_indices += list(o.get_free_indices())
-        free_indices = _get_free_indices(tuple(all_free_indices))
+        free_indices = _get_free_indices(all_free_indices)
         return free_indices
 
     def get_dummy_indices(self) -> set[Index]:
@@ -150,12 +154,12 @@ class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
         for o in self.operands:
             all_free_indices += list(o.get_free_indices())
             old_dummy_indices |= o.get_dummy_indices()
-        new_dummy_indices = _get_dummy_indices(tuple(all_free_indices))
+        new_dummy_indices = _get_dummy_indices(all_free_indices)
         return new_dummy_indices | old_dummy_indices
 
     def diff(self, target: _TensorIndexing) -> _IndexedExpr:
-        # I am 99% sure that target will never have any index repeated from the free indices
-        new_indices = tuple(self.get_free_indices() | target.get_free_indices())
+        # If target will have any index repeated from the free indices, it will be caught in one of the .diff calls
+        new_indices = list(self.get_free_indices() | target.get_free_indices())
         return sum(
             (
                 functools.reduce(
@@ -170,6 +174,10 @@ class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
 
     def __str__(self) -> str:
         return " * ".join([str(op) for op in self.operands])
+    
+    def replace_indices(self, replacements: dict[Index, Index]) -> None:
+        for o in self.operands:
+            o.replace_indices(replacements)
 
 
 class _Sum(_IndexedExpr, metaclass=utils.NoPublicConstructor):
@@ -215,13 +223,17 @@ class _Sum(_IndexedExpr, metaclass=utils.NoPublicConstructor):
         return all_dummy_indices
 
     def diff(self, target: _TensorIndexing) -> _IndexedExpr:
-        new_indices = tuple(self.get_free_indices() | target.get_free_indices())
+        new_indices = list(self.get_free_indices() | target.get_free_indices())
         return sum(
             (op.diff(target) for op in self.operands), _make_indexed(_Zero, new_indices)
         )
 
     def __str__(self) -> str:
         return " + ".join([str(op) for op in self.operands])
+
+    def replace_indices(self, replacements: dict[Index, Index]) -> None:
+        for o in self.operands:
+            o.replace_indices(replacements)
 
 
 @dataclass
@@ -242,9 +254,9 @@ class Delta(_IndexedExpr):
             return set()
 
     def diff(self, target: _TensorIndexing) -> _IndexedExpr:
-        indices_tuple = (self.i1, self.i2)
-        _check_indices_diff(indices_tuple, target.indices)
-        new_indices = indices_tuple + target.indices
+        indices_list = [self.i1, self.i2]
+        _check_indices_diff(indices_list, target.indices)
+        new_indices = indices_list + target.indices
         return _make_indexed(_Zero, new_indices)
 
     def __str__(self) -> str:
@@ -253,13 +265,20 @@ class Delta(_IndexedExpr):
     def get_children(self) -> list[_IndexedExpr]:
         return []
 
+    def replace_indices(self, replacements: dict[Index, Index]) -> None:
+        for old, new in replacements.items():
+            # it is guaranteed by construction that only one of these ifs will be hit
+            if self.i1 == old:
+                self.i1 = new
+            if self.i2 == old:
+                self.i2 = new
 
 @dataclass
 class _TensorIndexing(_IndexedExpr):
     tensor: _Tensor
-    indices: Tuple[Index, ...]
+    indices: list[Index]
 
-    def __init__(self, tensor: _Tensor, indices: Tuple[Index, ...]) -> None:
+    def __init__(self, tensor: _Tensor, indices: list[Index]) -> None:
         assert (
             len(indices) == tensor.rank
         ), f"Index count({len(indices)}) doesn't match rank({tensor.rank})"
@@ -294,10 +313,16 @@ class _TensorIndexing(_IndexedExpr):
 
     def get_children(self) -> list[_IndexedExpr]:
         return []
+    
+    def replace_indices(self, replacements: dict[Index, Index]) -> None:
+        for old, new in replacements.items():
+            for n in range(len(self.indices)):
+                if self.indices[n] == old:
+                    self.indices[n] = new
 
 
 class _Equality:
-    def __init__(self, indices: Tuple[Index, ...], rhs: _IndexedExpr) -> None:
+    def __init__(self, indices: list[Index], rhs: _IndexedExpr) -> None:
         dummy = _get_dummy_indices(indices)
         assert not dummy, f"Dummy indices({dummy}) detected in assignment LHS"
         rhs_free_indices = rhs.get_free_indices()
@@ -309,9 +334,9 @@ class _Equality:
 
 
 def _make_indexed(
-    T: Callable[[int], _Tensor], indices: Tuple[Index, ...]
+    T: Callable[[int], _Tensor], indices: list[Index]
 ) -> _IndexedExpr:
-    return T(len(indices)).__getitem__(indices)
+    return T(len(indices)).__getitem__(tuple(indices))
 
 
 class _Tensor(ABC):
@@ -319,14 +344,14 @@ class _Tensor(ABC):
         self.rank = rank
 
     def __getitem__(self, indices: Union[Index, Tuple[Index, ...]]) -> _TensorIndexing:
-        indices = _tuplify_index(indices)
-        return _TensorIndexing(self, indices)
+        indices_list = _listify_index(indices)
+        return _TensorIndexing(self, indices_list)
 
     def __setitem__(
         self, indices: Union[Index, Tuple[Index, ...]], expr: _IndexedExpr
     ) -> None:
-        indices = _tuplify_index(indices)
-        self.value = _Equality(indices, expr)
+        indices_list = _listify_index(indices)
+        self.value = _Equality(indices_list, expr)
 
     def diff(self, x: _TensorIndexing) -> _IndexedExpr:
         if not self.value:
