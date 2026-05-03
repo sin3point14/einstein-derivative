@@ -17,4 +17,4 @@ def test_scalar() -> None:
 
 
 test_matmul()
-# test_scalar()
+test_scalar()

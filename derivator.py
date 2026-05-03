@@ -4,13 +4,14 @@ from dataclasses import dataclass
 import copy
 import functools
 import operator
+import utils
 
 _used_names: dict[int, str] = dict()
 
 
 class Context:
     remove_zeros_and_ones: bool = True
-    simplify_deltas: bool = False
+    simplify_deltas: bool = True
 
 
 def _add_name(obj: Any, name: str) -> None:
@@ -65,9 +66,12 @@ def _get_dummy_indices(indices: Tuple[Index, ...]) -> set[Index]:
     return {key for key, val in index_counts.items() if val != 1}
 
 
-def _check_indices(ours: Tuple[Index, ...], target: Tuple[Index, ...]) -> None:
-    if set(ours) & set(target):
-        raise ValueError("Re-use of indices is not supported")
+def _check_indices_diff(ours: Tuple[Index, ...], target: Tuple[Index, ...]) -> None:
+    common_indices = set(ours) & set(target)
+    if common_indices:
+        raise ValueError(
+            f"Re-use of indices({common_indices}) in differentiation is not supported"
+        )
 
 
 class _IndexedExpr(ABC):
@@ -80,54 +84,10 @@ class _IndexedExpr(ABC):
         pass
 
     def __mul__(self, other: _IndexedExpr) -> _IndexedExpr:
-        if Context.remove_zeros_and_ones:
-            if (
-                isinstance(self, _TensorIndexing) and isinstance(self.tensor, _Zero)
-            ) or (
-                isinstance(other, _TensorIndexing) and isinstance(other.tensor, _Zero)
-            ):
-                self_free = self.get_free_indices()
-                other_free = other.get_free_indices()
-                return _make_indexed(_Zero, tuple(self_free ^ other_free))
-            if isinstance(self, _TensorIndexing) and isinstance(self.tensor, _One):
-                return other
-            if isinstance(other, _TensorIndexing) and isinstance(other.tensor, _One):
-                return self
-        if isinstance(self, _Product) and isinstance(other, _Product):
-            return _Product(self.operands + other.operands)
-        if isinstance(self, _Product):
-            return _Product(self.operands + [other])
-        if isinstance(other, _Product):
-            return _Product([self] + other.operands)
-        return _Product([self, other])
+        return _Product.create(self, other)
 
     def __add__(self, other: _IndexedExpr) -> _IndexedExpr:
-        self_free = self.get_free_indices()
-        other_free = other.get_free_indices()
-        assert (
-            self_free == other_free
-        ), f"LHS({self_free}) and RHS({other_free}) free indices don't match"
-
-        if Context.remove_zeros_and_ones:
-            self_zero = isinstance(self, _TensorIndexing) and isinstance(
-                self.tensor, _Zero
-            )
-            other_zero = isinstance(other, _TensorIndexing) and isinstance(
-                other.tensor, _Zero
-            )
-            if self_zero and other_zero:
-                return self  # return any
-            if self_zero:
-                return other
-            if other_zero:
-                return self
-        if isinstance(self, _Sum) and isinstance(other, _Sum):
-            return _Sum(self.operands + other.operands)
-        if isinstance(self, _Sum):
-            return _Sum(self.operands + [other])
-        if isinstance(other, _Sum):
-            return _Sum([self] + other.operands)
-        return _Sum([self, other])
+        return _Sum.create(self, other)
 
     @abstractmethod
     def __str__(self) -> str:
@@ -137,10 +97,31 @@ class _IndexedExpr(ABC):
         return self.__str__()
 
 
-@dataclass
-class _Product(_IndexedExpr):
-    # this will always have size >= 2
-    operands: list[_IndexedExpr]
+class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
+    def __init__(self, operands: list[_IndexedExpr]):
+        self.operands = operands
+
+    @classmethod
+    def create(cls, lhs: _IndexedExpr, rhs: _IndexedExpr) -> _IndexedExpr:
+        if Context.remove_zeros_and_ones:
+            if (isinstance(lhs, _TensorIndexing) and isinstance(lhs.tensor, _Zero)) or (
+                isinstance(rhs, _TensorIndexing) and isinstance(rhs.tensor, _Zero)
+            ):
+                self_free = lhs.get_free_indices()
+                other_free = rhs.get_free_indices()
+                return _make_indexed(_Zero, tuple(self_free ^ other_free))
+            if isinstance(lhs, _TensorIndexing) and isinstance(lhs.tensor, _One):
+                return rhs
+            if isinstance(rhs, _TensorIndexing) and isinstance(rhs.tensor, _One):
+                return lhs
+
+        if isinstance(lhs, _Product) and isinstance(rhs, _Product):
+            return _Product._create(lhs.operands + rhs.operands)
+        if isinstance(lhs, _Product):
+            return _Product._create(lhs.operands + [rhs])
+        if isinstance(rhs, _Product):
+            return _Product._create([lhs] + rhs.operands)
+        return _Product._create([lhs, rhs])
 
     def get_free_indices(self) -> set[Index]:
         all_free_indices = []
@@ -168,10 +149,38 @@ class _Product(_IndexedExpr):
         return " * ".join([str(op) for op in self.operands])
 
 
-@dataclass
-class _Sum(_IndexedExpr):
-    # this will always have size >= 2
-    operands: list[_IndexedExpr]
+class _Sum(_IndexedExpr, metaclass=utils.NoPublicConstructor):
+    def __init__(self, operands: list[_IndexedExpr]):
+        self.operands = operands
+
+    @classmethod
+    def create(cls, lhs: _IndexedExpr, rhs: _IndexedExpr) -> _IndexedExpr:
+        lhs_free = lhs.get_free_indices()
+        rhs_free = rhs.get_free_indices()
+        assert (
+            lhs_free == rhs_free
+        ), f"LHS({lhs_free}) and RHS({rhs_free}) free indices don't match"
+
+        if Context.remove_zeros_and_ones:
+            self_zero = isinstance(lhs, _TensorIndexing) and isinstance(
+                lhs.tensor, _Zero
+            )
+            other_zero = isinstance(rhs, _TensorIndexing) and isinstance(
+                rhs.tensor, _Zero
+            )
+            if self_zero and other_zero:
+                return lhs  # return any
+            if self_zero:
+                return rhs
+            if other_zero:
+                return lhs
+        if isinstance(lhs, _Sum) and isinstance(rhs, _Sum):
+            return _Sum._create(lhs.operands + rhs.operands)
+        if isinstance(lhs, _Sum):
+            return _Sum._create(lhs.operands + [rhs])
+        if isinstance(rhs, _Sum):
+            return _Sum._create([lhs] + rhs.operands)
+        return _Sum._create([lhs, rhs])
 
     def get_free_indices(self) -> set[Index]:
         return self.operands[0].get_free_indices()
@@ -187,7 +196,7 @@ class _Sum(_IndexedExpr):
 
 
 @dataclass
-class _Delta(_IndexedExpr):
+class Delta(_IndexedExpr):
     i1: Index
     i2: Index
 
@@ -199,12 +208,15 @@ class _Delta(_IndexedExpr):
 
     def diff(self, target: _TensorIndexing) -> _IndexedExpr:
         indices_tuple = (self.i1, self.i2)
-        _check_indices(indices_tuple, target.indices)
+        _check_indices_diff(indices_tuple, target.indices)
         new_indices = indices_tuple + target.indices
         return _make_indexed(_Zero, new_indices)
 
     def __str__(self) -> str:
         return f"delta({self.i1}, {self.i2})"
+
+    def get_children(self) -> list[_IndexedExpr]:
+        return []
 
 
 @dataclass
@@ -212,17 +224,28 @@ class _TensorIndexing(_IndexedExpr):
     tensor: _Tensor
     indices: Tuple[Index, ...]
 
+    def __init__(self, tensor: _Tensor, indices: Tuple[Index, ...]) -> None:
+        assert (
+            len(indices) == tensor.rank
+        ), f"Index count({len(indices)}) doesn't match rank({tensor.rank})"
+        counts = _get_index_counts(indices)
+        for i, c in counts.items():
+            if c > 2:
+                raise ValueError(f"Index {i} appears more the 2 times")
+        self.tensor = tensor
+        self.indices = indices
+
     def get_free_indices(self) -> set[Index]:
         return _get_free_indices(self.indices)
 
     def diff(self, target: _TensorIndexing) -> _IndexedExpr:
-        _check_indices(self.indices, target.indices)
+        _check_indices_diff(self.indices, target.indices)
         if target.tensor == self.tensor:
             if self.tensor.rank == 0:
                 return _One()[()]
-            expr: _IndexedExpr = _Delta(self.indices[0], target.indices[0])
+            expr: _IndexedExpr = Delta(self.indices[0], target.indices[0])
             for i, j in zip(self.indices[1:], target.indices[1:]):
-                expr = expr * _Delta(i, j)
+                expr = expr * Delta(i, j)
             return expr
         else:
             new_indices = self.indices + target.indices
@@ -231,11 +254,14 @@ class _TensorIndexing(_IndexedExpr):
     def __str__(self) -> str:
         return f"{self.tensor}[{",".join([str(i) for i in self.indices])}]"
 
+    def get_children(self) -> list[_IndexedExpr]:
+        return []
+
 
 class _Equality:
     def __init__(self, indices: Tuple[Index, ...], rhs: _IndexedExpr) -> None:
         dummy = _get_dummy_indices(indices)
-        assert not dummy, f"Dummy indices detected in assignment LHS: {dummy}"
+        assert not dummy, f"Dummy indices({dummy}) detected in assignment LHS"
         rhs_free_indices = rhs.get_free_indices()
         assert rhs_free_indices == set(
             indices
@@ -256,9 +282,6 @@ class _Tensor(ABC):
 
     def __getitem__(self, indices: Union[Index, Tuple[Index, ...]]) -> _TensorIndexing:
         indices = _tuplify_index(indices)
-        assert (
-            len(indices) == self.rank
-        ), f"Index count({len(indices)}) doesn't match rank({self.rank})"
         return _TensorIndexing(self, indices)
 
     def __setitem__(
@@ -270,7 +293,6 @@ class _Tensor(ABC):
     def diff(self, x: _TensorIndexing) -> _IndexedExpr:
         if not self.value:
             raise ValueError("Tensor has not been assigned an expr")
-
         return self.value.rhs.diff(x)
 
     @abstractmethod
