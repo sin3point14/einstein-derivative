@@ -82,8 +82,9 @@ class _IndexedExpr(ABC):
     def __mul__(self, other: _IndexedExpr) -> _IndexedExpr:
         if Context.remove_zeros_and_ones:
             if (
-                (isinstance(self, _TensorIndexing) and isinstance(self.tensor, _Zero))
-                or (isinstance(other, _TensorIndexing) and isinstance(other.tensor, _Zero))
+                isinstance(self, _TensorIndexing) and isinstance(self.tensor, _Zero)
+            ) or (
+                isinstance(other, _TensorIndexing) and isinstance(other.tensor, _Zero)
             ):
                 self_free = self.get_free_indices()
                 other_free = other.get_free_indices()
@@ -92,6 +93,12 @@ class _IndexedExpr(ABC):
                 return other
             if isinstance(other, _TensorIndexing) and isinstance(other.tensor, _One):
                 return self
+        if isinstance(self, _Product) and isinstance(other, _Product):
+            return _Product(self.operands + other.operands)
+        if isinstance(self, _Product):
+            return _Product(self.operands + [other])
+        if isinstance(other, _Product):
+            return _Product([self] + other.operands)
         return _Product([self, other])
 
     def __add__(self, other: _IndexedExpr) -> _IndexedExpr:
@@ -114,6 +121,12 @@ class _IndexedExpr(ABC):
                 return other
             if other_zero:
                 return self
+        if isinstance(self, _Sum) and isinstance(other, _Sum):
+            return _Sum(self.operands + other.operands)
+        if isinstance(self, _Sum):
+            return _Sum(self.operands + [other])
+        if isinstance(other, _Sum):
+            return _Sum([self] + other.operands)
         return _Sum([self, other])
 
     @abstractmethod
@@ -168,7 +181,6 @@ class _Sum(_IndexedExpr):
         return sum(
             (op.diff(target) for op in self.operands), _make_indexed(_Zero, new_indices)
         )
-        return self.lhs.diff(target) + self.rhs.diff(target)
 
     def __str__(self) -> str:
         return " + ".join([str(op) for op in self.operands])
