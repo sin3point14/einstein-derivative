@@ -80,6 +80,10 @@ class _IndexedExpr(ABC):
         pass
 
     @abstractmethod
+    def get_dummy_indices(self) -> set[Index]:
+        pass
+
+    @abstractmethod
     def diff(self, target: _TensorIndexing) -> _IndexedExpr:
         pass
 
@@ -103,6 +107,16 @@ class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
 
     @classmethod
     def create(cls, lhs: _IndexedExpr, rhs: _IndexedExpr) -> _IndexedExpr:
+        free_lhs, dummy_lhs = lhs.get_free_indices(), lhs.get_dummy_indices()
+        free_rhs, dummy_rhs = rhs.get_free_indices(), rhs.get_dummy_indices()
+        common_dummy = dummy_lhs & dummy_rhs
+        assert not common_dummy, f"Indices({common_dummy}) appear more than 2 times"
+        all_dummy = dummy_rhs | dummy_lhs
+        lhs_repeated = free_lhs & all_dummy
+        rhs_repeated = free_rhs & all_dummy
+        repeated = lhs_repeated | rhs_repeated
+        assert not repeated, f"Indices({repeated}) appear more than 2 times"
+
         if Context.remove_zeros_and_ones:
             if (isinstance(lhs, _TensorIndexing) and isinstance(lhs.tensor, _Zero)) or (
                 isinstance(rhs, _TensorIndexing) and isinstance(rhs.tensor, _Zero)
@@ -129,6 +143,15 @@ class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
             all_free_indices += list(o.get_free_indices())
         free_indices = _get_free_indices(tuple(all_free_indices))
         return free_indices
+
+    def get_dummy_indices(self) -> set[Index]:
+        old_dummy_indices = set()
+        all_free_indices = []
+        for o in self.operands:
+            all_free_indices += list(o.get_free_indices())
+            old_dummy_indices |= o.get_dummy_indices()
+        new_dummy_indices = _get_dummy_indices(tuple(all_free_indices))
+        return new_dummy_indices | old_dummy_indices
 
     def diff(self, target: _TensorIndexing) -> _IndexedExpr:
         # I am 99% sure that target will never have any index repeated from the free indices
@@ -185,6 +208,12 @@ class _Sum(_IndexedExpr, metaclass=utils.NoPublicConstructor):
     def get_free_indices(self) -> set[Index]:
         return self.operands[0].get_free_indices()
 
+    def get_dummy_indices(self) -> set[Index]:
+        all_dummy_indices = set()
+        for o in self.operands:
+            all_dummy_indices |= o.get_dummy_indices()
+        return all_dummy_indices
+
     def diff(self, target: _TensorIndexing) -> _IndexedExpr:
         new_indices = tuple(self.get_free_indices() | target.get_free_indices())
         return sum(
@@ -205,6 +234,12 @@ class Delta(_IndexedExpr):
             return set()
         else:
             return {self.i1, self.i2}
+
+    def get_dummy_indices(self) -> set[Index]:
+        if self.i1 == self.i2:
+            return {self.i1}
+        else:
+            return set()
 
     def diff(self, target: _TensorIndexing) -> _IndexedExpr:
         indices_tuple = (self.i1, self.i2)
@@ -237,6 +272,9 @@ class _TensorIndexing(_IndexedExpr):
 
     def get_free_indices(self) -> set[Index]:
         return _get_free_indices(self.indices)
+
+    def get_dummy_indices(self) -> set[Index]:
+        return _get_dummy_indices(self.indices)
 
     def diff(self, target: _TensorIndexing) -> _IndexedExpr:
         _check_indices_diff(self.indices, target.indices)
