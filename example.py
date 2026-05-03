@@ -3,10 +3,11 @@ from derivator import *
 
 def test_matmul() -> None:
     y, A, x = Vector("y"), Matrix("A"), Vector("x")
-    i, j, k = Index(3, "i"), Index(3, "j"), Index(3, "k")  # can we reuse j?
+    i, j, k = Index("i"), Index("j"), Index("k")  # can we reuse j?
 
     y[i] = A[i, j] * x[j]
     print(y.diff(x[k]))
+
 
 def test_scalar() -> None:
     y, a, x = Scalar("y"), Scalar("a"), Scalar("x")
@@ -16,4 +17,4 @@ def test_scalar() -> None:
 
 
 test_matmul()
-test_scalar()
+# test_scalar()
