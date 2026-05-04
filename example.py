@@ -29,7 +29,7 @@ def test_stvk_green_strain() -> None:
     E = Matrix("E")
     i, j, k, l = Index("i"), Index("j"), Index("k"), Index("l")
 
-    psi[()] = mu[()] * E[i, j] * E[i, j] + 0.5 * lambda_[()] * E[i, i] * E[j, j]
+    psi[()] = mu[()] * E[i, j] * E[i, j] + 0.5 * lambda_[()] * (E[i, i] ** 2)
     print(psi.diff(E[k, l]))
 
 

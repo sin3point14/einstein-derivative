@@ -99,6 +99,9 @@ class _IndexedExpr(ABC):
     def __add__(self, other: "_IndexedExpr") -> "_IndexedExpr":
         return _Sum.create(self, other)
 
+    def __pow__(self, other: int | float) -> "_IndexedExpr":
+        return _Pow.create(self, other)
+
     @abstractmethod
     def __str__(self) -> str:
         pass
@@ -113,6 +116,38 @@ class _IndexedExpr(ABC):
     @abstractmethod
     def simplify_deltas(self) -> None:
         pass
+
+
+class _Pow(_IndexedExpr, metaclass=utils.NoPublicConstructor):
+    def __init__(self, base: _IndexedExpr, exponent: int | float) -> None:
+        self.base = base
+        self.exponent = exponent
+
+    @classmethod
+    def create(cls, base: _IndexedExpr, exponent: int | float) -> _IndexedExpr:
+        if exponent == 1:
+            return base
+        if exponent == 0:
+            return _One()[()]
+        return _Pow._create(base, exponent)
+
+    def get_free_indices(self) -> set[Index]:
+        return self.base.get_free_indices()
+
+    def get_dummy_indices(self) -> set[Index]:
+        return self.base.get_dummy_indices()
+
+    def diff(self, target: _TensorIndexing) -> _IndexedExpr:
+        return self.exponent * (self.base.diff(target) ** (self.exponent - 1))
+
+    def __str__(self) -> str:
+        return f"(({self.base}) ** {self.exponent})"
+
+    def replace_indices(self, replacements: dict[Index, Index]) -> None:
+        return self.base.replace_indices(replacements)
+
+    def simplify_deltas(self) -> None:
+        return self.base.simplify_deltas()
 
 
 class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
@@ -220,9 +255,11 @@ class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
                 deletion = False
                 if o.i1 in dummy_indices:
                     add_replacement(o.i1, o.i2)
+                    dummy_indices.remove(o.i1)
                     deletion = True
                 if not deletion and o.i2 in dummy_indices:
                     add_replacement(o.i2, o.i1)
+                    dummy_indices.remove(o.i2)
                     deletion = True
                 if deletion:
                     deletion_set.add(n)
@@ -233,6 +270,9 @@ class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
 
         for o in self.operands:
             o.replace_indices(replacements)
+
+        for o in self.operands:
+            o.simplify_deltas()
 
 
 class _Sum(_IndexedExpr, metaclass=utils.NoPublicConstructor):
@@ -470,6 +510,7 @@ class _Zero(_Tensor):
 
     def __str__(self) -> str:
         return "0"
+
 
 # TODO: Convert to _One if 1 is passed
 class _ImplicitScalar(_Tensor):
