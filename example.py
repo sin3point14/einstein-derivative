@@ -15,6 +15,7 @@ def test_scalar() -> None:
 
     print(y.diff(x[()]))
 
+
 def test_dot_prod() -> None:
     y, a, x = Scalar("y"), Vector("a"), Vector("x")
     i, j = Index("i"), Index("j")
@@ -24,12 +25,13 @@ def test_dot_prod() -> None:
 
 
 def test_stvk_green_strain() -> None:
-    psi, mu, lambda_by_2 = Scalar("psi"), Scalar("mu"), Scalar("lambda_by_2")
+    psi, mu, lambda_ = Scalar("psi"), Scalar("mu"), Scalar("lambda")
     E = Matrix("E")
     i, j, k, l = Index("i"), Index("j"), Index("k"), Index("l")
 
-    psi[()] = mu[()] * E[i, j] * E[i, j] + lambda_by_2[()] * E[i, i] * E[j, j]
+    psi[()] = mu[()] * E[i, j] * E[i, j] + 0.5 * lambda_[()] * E[i, i] * E[j, j]
     print(psi.diff(E[k, l]))
+
 
 test_matmul()
 test_scalar()

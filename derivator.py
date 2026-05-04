@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import Union, Tuple, Any, Callable
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -84,13 +85,18 @@ class _IndexedExpr(ABC):
         pass
 
     @abstractmethod
-    def diff(self, target: _TensorIndexing) -> _IndexedExpr:
+    def diff(self, target: "_TensorIndexing") -> "_IndexedExpr":
         pass
 
-    def __mul__(self, other: _IndexedExpr) -> _IndexedExpr:
+    def __mul__(self, other: "_IndexedExpr" | int | float) -> "_IndexedExpr":
+        if isinstance(other, int) or isinstance(other, float):
+            other = _ImplicitScalar(other).__getitem__(())
         return _Product.create(self, other)
 
-    def __add__(self, other: _IndexedExpr) -> _IndexedExpr:
+    def __rmul__(self, other: int | float) -> "_IndexedExpr":
+        return _Product.create(_ImplicitScalar(other).__getitem__(()), self)
+
+    def __add__(self, other: "_IndexedExpr") -> "_IndexedExpr":
         return _Sum.create(self, other)
 
     @abstractmethod
@@ -465,10 +471,16 @@ class _Zero(_Tensor):
     def __str__(self) -> str:
         return "0"
 
-
-class _One(_Tensor):
-    def __init__(self) -> None:
+# TODO: Convert to _One if 1 is passed
+class _ImplicitScalar(_Tensor):
+    def __init__(self, num: int | float) -> None:
         super().__init__(0)
+        self.num = num
 
     def __str__(self) -> str:
-        return "1"
+        return str(self.num)
+
+
+class _One(_ImplicitScalar):
+    def __init__(self) -> None:
+        super().__init__(1)
