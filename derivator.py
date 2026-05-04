@@ -85,22 +85,19 @@ class _IndexedExpr(ABC):
         pass
 
     @abstractmethod
-    def diff(self, target: "_TensorIndexing") -> "_IndexedExpr":
+    def _diff(self, target: "_TensorIndexing") -> "_IndexedExpr":
         pass
 
     def __mul__(self, other: "_IndexedExpr" | int | float) -> "_IndexedExpr":
         if isinstance(other, int) or isinstance(other, float):
-            other = _ImplicitScalar(other).__getitem__(())
+            other = _ImplicitScalar(other)
         return _Product.create(self, other)
 
     def __rmul__(self, other: int | float) -> "_IndexedExpr":
-        return _Product.create(_ImplicitScalar(other).__getitem__(()), self)
+        return _Product.create(_ImplicitScalar(other), self)
 
     def __add__(self, other: "_IndexedExpr") -> "_IndexedExpr":
         return _Sum.create(self, other)
-
-    def __pow__(self, other: int | float) -> "_IndexedExpr":
-        return _Pow.create(self, other)
 
     @abstractmethod
     def __str__(self) -> str:
@@ -116,38 +113,6 @@ class _IndexedExpr(ABC):
     @abstractmethod
     def simplify_deltas(self) -> None:
         pass
-
-
-class _Pow(_IndexedExpr, metaclass=utils.NoPublicConstructor):
-    def __init__(self, base: _IndexedExpr, exponent: int | float) -> None:
-        self.base = base
-        self.exponent = exponent
-
-    @classmethod
-    def create(cls, base: _IndexedExpr, exponent: int | float) -> _IndexedExpr:
-        if exponent == 1:
-            return base
-        if exponent == 0:
-            return _One()[()]
-        return _Pow._create(base, exponent)
-
-    def get_free_indices(self) -> set[Index]:
-        return self.base.get_free_indices()
-
-    def get_dummy_indices(self) -> set[Index]:
-        return self.base.get_dummy_indices()
-
-    def diff(self, target: _TensorIndexing) -> _IndexedExpr:
-        return self.exponent * (self.base.diff(target) ** (self.exponent - 1))
-
-    def __str__(self) -> str:
-        return f"(({self.base}) ** {self.exponent})"
-
-    def replace_indices(self, replacements: dict[Index, Index]) -> None:
-        return self.base.replace_indices(replacements)
-
-    def simplify_deltas(self) -> None:
-        return self.base.simplify_deltas()
 
 
 class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
@@ -202,15 +167,15 @@ class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
         new_dummy_indices = _get_dummy_indices(all_free_indices)
         return new_dummy_indices | old_dummy_indices
 
-    def diff(self, target: _TensorIndexing) -> _IndexedExpr:
+    def _diff(self, target: _TensorIndexing) -> _IndexedExpr:
         # If target will have any index repeated from the free indices, it will be caught in one of the .diff calls
         new_indices = list(self.get_free_indices() | target.get_free_indices())
         return sum(
             (
                 functools.reduce(
                     operator.mul,
-                    self.operands[:i] + [op.diff(target)] + self.operands[i + 1 :],
-                    _One()[()],
+                    self.operands[:i] + [op._diff(target)] + self.operands[i + 1 :],
+                    _One(),
                 )
                 for i, op in enumerate(self.operands)
             ),
@@ -317,10 +282,11 @@ class _Sum(_IndexedExpr, metaclass=utils.NoPublicConstructor):
             all_dummy_indices |= o.get_dummy_indices()
         return all_dummy_indices
 
-    def diff(self, target: _TensorIndexing) -> _IndexedExpr:
+    def _diff(self, target: _TensorIndexing) -> _IndexedExpr:
         new_indices = list(self.get_free_indices() | target.get_free_indices())
         return sum(
-            (op.diff(target) for op in self.operands), _make_indexed(_Zero, new_indices)
+            (op._diff(target) for op in self.operands),
+            _make_indexed(_Zero, new_indices),
         )
 
     def __str__(self) -> str:
@@ -356,7 +322,7 @@ class Delta(_IndexedExpr):
         else:
             return set()
 
-    def diff(self, target: _TensorIndexing) -> _IndexedExpr:
+    def _diff(self, target: _TensorIndexing) -> _IndexedExpr:
         indices_list = [self.i1, self.i2]
         _check_indices_diff(indices_list, target.indices)
         new_indices = indices_list + target.indices
@@ -402,11 +368,11 @@ class _TensorIndexing(_IndexedExpr):
     def get_dummy_indices(self) -> set[Index]:
         return _get_dummy_indices(self.indices)
 
-    def diff(self, target: _TensorIndexing) -> _IndexedExpr:
+    def _diff(self, target: _TensorIndexing) -> _IndexedExpr:
         _check_indices_diff(self.indices, target.indices)
         if target.tensor == self.tensor:
             if self.tensor.rank == 0:
-                return _One()[()]
+                return _One()
             expr: _IndexedExpr = Delta(self.indices[0], target.indices[0])
             for i, j in zip(self.indices[1:], target.indices[1:]):
                 expr = expr * Delta(i, j)
@@ -416,7 +382,10 @@ class _TensorIndexing(_IndexedExpr):
             return _make_indexed(_Zero, new_indices)
 
     def __str__(self) -> str:
-        return f"{self.tensor}[{",".join([str(i) for i in self.indices])}]"
+        if self.indices:
+            return f"{self.tensor}[{",".join([str(i) for i in self.indices])}]"
+        else:
+            return str(self.tensor)
 
     def get_children(self) -> list[_IndexedExpr]:
         return []
@@ -431,16 +400,11 @@ class _TensorIndexing(_IndexedExpr):
         return
 
 
-class _Equality:
-    def __init__(self, indices: list[Index], rhs: _IndexedExpr) -> None:
-        dummy = _get_dummy_indices(indices)
-        assert not dummy, f"Dummy indices({dummy}) detected in assignment LHS"
-        rhs_free_indices = rhs.get_free_indices()
-        assert rhs_free_indices == set(
-            indices
-        ), f"RHS indices({rhs_free_indices}) don't match LHS({indices})"
-        self.rhs = rhs
-        self.free_indices = indices  # we don't really need this i think
+def diff(y: _IndexedExpr, x: _TensorIndexing) -> _IndexedExpr:
+    diff_expr = y._diff(x)
+    if Context.simplify_deltas:
+        diff_expr.simplify_deltas()
+    return diff_expr
 
 
 def _make_indexed(T: Callable[[int], _Tensor], indices: list[Index]) -> _IndexedExpr:
@@ -454,20 +418,6 @@ class _Tensor(ABC):
     def __getitem__(self, indices: Union[Index, Tuple[Index, ...]]) -> _TensorIndexing:
         indices_list = _listify_index(indices)
         return _TensorIndexing(self, indices_list)
-
-    def __setitem__(
-        self, indices: Union[Index, Tuple[Index, ...]], expr: _IndexedExpr
-    ) -> None:
-        indices_list = _listify_index(indices)
-        self.value = _Equality(indices_list, expr)
-
-    def diff(self, x: _TensorIndexing) -> _IndexedExpr:
-        if not self.value:
-            raise ValueError("Tensor has not been assigned an expr")
-        diff_expr = self.value.rhs.diff(x)
-        if Context.simplify_deltas:
-            diff_expr.simplify_deltas()
-        return diff_expr
 
     @abstractmethod
     def __str__(self) -> str:
@@ -489,9 +439,10 @@ class Tensor(_Tensor):
         return _used_names[id(self)]
 
 
-class Scalar(Tensor):
+# To make this directly indexable
+class Scalar(_TensorIndexing):
     def __init__(self, name: str) -> None:
-        super().__init__(0, name)
+        super().__init__(Tensor(0, name), [])
 
 
 class Vector(Tensor):
@@ -513,13 +464,17 @@ class _Zero(_Tensor):
 
 
 # TODO: Convert to _One if 1 is passed
-class _ImplicitScalar(_Tensor):
-    def __init__(self, num: int | float) -> None:
-        super().__init__(0)
-        self.num = num
+class _ImplicitScalar(_TensorIndexing):
+    class Tensor(_Tensor):
+        def __init__(self, num: int | float) -> None:
+            super().__init__(0)
+            self.num = num
 
-    def __str__(self) -> str:
-        return str(self.num)
+        def __str__(self) -> str:
+            return str(self.num)
+
+    def __init__(self, num: int | float) -> None:
+        super().__init__(self.Tensor(num), [])
 
 
 class _One(_ImplicitScalar):
