@@ -6,6 +6,7 @@ import copy
 import functools
 import operator
 import utils
+from enum import StrEnum
 
 _used_names: dict[int, str] = dict()
 
@@ -75,7 +76,23 @@ def _check_indices_diff(ours: list[Index], target: list[Index]) -> None:
         )
 
 
+class _Sign(StrEnum):
+    Plus = "+"
+    Minus = "-"
+
+
 class _IndexedExpr(ABC):
+    def __init__(self, sign: _Sign = _Sign.Plus):
+        self.sign = sign
+
+    def __neg__(self) -> _IndexedExpr:
+        new_sign = _Sign.Minus
+        if self.sign == _Sign.Minus:
+            new_sign = _Sign.Plus
+        new_expr = copy.copy(self)
+        new_expr.sign = new_sign
+        return new_expr
+
     @abstractmethod
     def get_free_indices(self) -> set[Index]:
         pass
@@ -99,6 +116,10 @@ class _IndexedExpr(ABC):
     def __add__(self, other: "_IndexedExpr") -> "_IndexedExpr":
         return _Sum.create(self, other)
 
+    def __sub__(self, other: "_IndexedExpr") -> "_IndexedExpr":
+        other.__neg__()
+        return _Sum.create(self, other)
+
     @abstractmethod
     def __str__(self) -> str:
         pass
@@ -114,10 +135,17 @@ class _IndexedExpr(ABC):
     def simplify_deltas(self) -> None:
         pass
 
+    def add_sign(self, expr: str) -> "str":
+        if self.sign == _Sign.Plus:
+            return expr
+        else:
+            return f"-({expr})"
+
 
 class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
     def __init__(self, operands: list[_IndexedExpr]):
         self.operands = operands
+        super().__init__()
 
     @classmethod
     def create(cls, lhs: _IndexedExpr, rhs: _IndexedExpr) -> _IndexedExpr:
@@ -183,7 +211,7 @@ class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
         )
 
     def __str__(self) -> str:
-        return " * ".join([str(op) for op in self.operands])
+        return self.add_sign(" * ".join([str(op) for op in self.operands]))
 
     def replace_indices(self, replacements: dict[Index, Index]) -> None:
         for o in self.operands:
@@ -243,6 +271,7 @@ class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
 class _Sum(_IndexedExpr, metaclass=utils.NoPublicConstructor):
     def __init__(self, operands: list[_IndexedExpr]):
         self.operands = operands
+        super().__init__()
 
     @classmethod
     def create(cls, lhs: _IndexedExpr, rhs: _IndexedExpr) -> _IndexedExpr:
@@ -290,7 +319,7 @@ class _Sum(_IndexedExpr, metaclass=utils.NoPublicConstructor):
         )
 
     def __str__(self) -> str:
-        return " + ".join([str(op) for op in self.operands])
+        return self.add_sign(" + ".join([str(op) for op in self.operands]))
 
     def replace_indices(self, replacements: dict[Index, Index]) -> None:
         for o in self.operands:
@@ -302,13 +331,11 @@ class _Sum(_IndexedExpr, metaclass=utils.NoPublicConstructor):
 
 
 class Delta(_IndexedExpr):
-    i1: Index
-    i2: Index
-
     def __init__(self, i1: Index, i2: Index):
         assert i1 != i2, f"Delta index({i1}) cannot be repeated"
         self.i1 = i1
         self.i2 = i2
+        super().__init__()
 
     def get_free_indices(self) -> set[Index]:
         if self.i1 == self.i2:
@@ -329,7 +356,7 @@ class Delta(_IndexedExpr):
         return _make_indexed(_Zero, new_indices)
 
     def __str__(self) -> str:
-        return f"delta({self.i1}, {self.i2})"
+        return self.add_sign(f"delta({self.i1}, {self.i2})")
 
     def get_children(self) -> list[_IndexedExpr]:
         return []
@@ -361,6 +388,7 @@ class _TensorIndexing(_IndexedExpr):
                 raise ValueError(f"Index {i} appears more the 2 times")
         self.tensor = tensor
         self.indices = indices
+        super().__init__()
 
     def get_free_indices(self) -> set[Index]:
         return _get_free_indices(self.indices)
@@ -383,9 +411,11 @@ class _TensorIndexing(_IndexedExpr):
 
     def __str__(self) -> str:
         if self.indices:
-            return f"{self.tensor}[{",".join([str(i) for i in self.indices])}]"
+            return self.add_sign(
+                f"{self.tensor}[{",".join([str(i) for i in self.indices])}]"
+            )
         else:
-            return str(self.tensor)
+            return self.add_sign(str(self.tensor))
 
     def get_children(self) -> list[_IndexedExpr]:
         return []
@@ -398,6 +428,18 @@ class _TensorIndexing(_IndexedExpr):
 
     def simplify_deltas(self) -> None:
         return
+
+
+# class _Equality:
+#     def __init__(self, indices: list[Index], rhs: _IndexedExpr) -> None:
+#         dummy = _get_dummy_indices(indices)
+#         assert not dummy, f"Dummy indices({dummy}) detected in assignment LHS"
+#         rhs_free_indices = rhs.get_free_indices()
+#         assert rhs_free_indices == set(
+#             indices
+#         ), f"RHS indices({rhs_free_indices}) don't match LHS({indices})"
+#         self.rhs = rhs
+#         self.free_indices = indices  # we don't really need this i think
 
 
 def diff(y: _IndexedExpr, x: _TensorIndexing) -> _IndexedExpr:
@@ -418,6 +460,17 @@ class _Tensor(ABC):
     def __getitem__(self, indices: Union[Index, Tuple[Index, ...]]) -> _TensorIndexing:
         indices_list = _listify_index(indices)
         return _TensorIndexing(self, indices_list)
+
+    # def __setitem__(
+    #     self, indices: Union[Index, Tuple[Index, ...]], expr: _IndexedExpr
+    # ) -> None:
+    #     indices_list = _listify_index(indices)
+    #     self.value = _Equality(indices_list, expr)
+
+    # def diff(self, x: _TensorIndexing) -> _IndexedExpr:
+    #     if not self.value:
+    #         raise ValueError("Tensor has not been assigned an expr")
+    #     return diff(self.value.rhs, x)
 
     @abstractmethod
     def __str__(self) -> str:
