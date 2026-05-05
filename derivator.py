@@ -87,6 +87,15 @@ class _Sign(StrEnum):
             return _Sign.Minus
         else:
             raise ValueError("Unreachable")
+    
+    def to_scalar(self) -> _ImplicitScalar:
+        if self == _Sign.Minus:
+            return _ImplicitScalar(-1)
+        elif self == _Sign.Plus:
+            return _ImplicitScalar(1)
+        else:
+            raise ValueError("Unreachable")
+    
 
 
 class _IndexedExpr(ABC):
@@ -106,8 +115,12 @@ class _IndexedExpr(ABC):
     def get_dummy_indices(self) -> set[Index]:
         pass
 
-    @abstractmethod
     def _diff(self, target: "_TensorIndexing") -> "_IndexedExpr":
+        expr = self._signless_diff(target)
+        return self.sign.to_scalar() * expr
+
+    @abstractmethod
+    def _signless_diff(self, target: "_TensorIndexing") -> "_IndexedExpr":
         pass
 
     def __mul__(self, other: "_IndexedExpr" | int | float) -> "_IndexedExpr":
@@ -173,15 +186,17 @@ class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
         assert not repeated, f"Indices({repeated}) appear more than 2 times"
 
         if Context.remove_zeros_and_ones:
-            if (isinstance(lhs, _TensorIndexing) and isinstance(lhs.tensor, _Zero)) or (
-                isinstance(rhs, _TensorIndexing) and isinstance(rhs.tensor, _Zero)
-            ):
+            if is_zero(lhs) or is_zero(rhs):
                 self_free = lhs.get_free_indices()
                 other_free = rhs.get_free_indices()
                 return _make_indexed(_Zero, list(self_free ^ other_free))
-            if isinstance(lhs, _TensorIndexing) and isinstance(lhs.tensor, _One):
+            if is_one(lhs):
+                if lhs.sign == _Sign.Minus:
+                    rhs = rhs.__neg__()
                 return rhs
-            if isinstance(rhs, _TensorIndexing) and isinstance(rhs.tensor, _One):
+            if is_one(rhs):
+                if rhs.sign == _Sign.Minus:
+                    lhs = lhs.__neg__()
                 return lhs
 
         if isinstance(lhs, _Product) and isinstance(rhs, _Product):
@@ -208,7 +223,7 @@ class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
         new_dummy_indices = _get_dummy_indices(all_free_indices)
         return new_dummy_indices | old_dummy_indices
 
-    def _diff(self, target: _TensorIndexing) -> _IndexedExpr:
+    def _signless_diff(self, target: _TensorIndexing) -> _IndexedExpr:
         # If target will have any index repeated from the free indices, it will be caught in one of the .diff calls
         new_indices = list(self.get_free_indices() | target.get_free_indices())
         return sum(
@@ -216,7 +231,7 @@ class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
                 functools.reduce(
                     operator.mul,
                     self.operands[:i] + [op._diff(target)] + self.operands[i + 1 :],
-                    _One(),
+                    _ImplicitScalar(1),
                 )
                 for i, op in enumerate(self.operands)
             ),
@@ -295,17 +310,13 @@ class _Sum(_IndexedExpr, metaclass=utils.NoPublicConstructor):
         ), f"LHS({lhs_free}) and RHS({rhs_free}) free indices don't match"
 
         if Context.remove_zeros_and_ones:
-            self_zero = isinstance(lhs, _TensorIndexing) and isinstance(
-                lhs.tensor, _Zero
-            )
-            other_zero = isinstance(rhs, _TensorIndexing) and isinstance(
-                rhs.tensor, _Zero
-            )
-            if self_zero and other_zero:
+            lhs_zero = is_zero(lhs)
+            rhs_zero = is_zero(rhs)
+            if lhs_zero and rhs_zero:
                 return lhs  # return any
-            if self_zero:
+            if lhs_zero:
                 return rhs
-            if other_zero:
+            if rhs_zero:
                 return lhs
         if isinstance(lhs, _Sum) and isinstance(rhs, _Sum):
             return _Sum._create(lhs.operands + rhs.operands)
@@ -324,7 +335,7 @@ class _Sum(_IndexedExpr, metaclass=utils.NoPublicConstructor):
             all_dummy_indices |= o.get_dummy_indices()
         return all_dummy_indices
 
-    def _diff(self, target: _TensorIndexing) -> _IndexedExpr:
+    def _signless_diff(self, target: _TensorIndexing) -> _IndexedExpr:
         new_indices = list(self.get_free_indices() | target.get_free_indices())
         return sum(
             (op._diff(target) for op in self.operands),
@@ -368,7 +379,7 @@ class Delta(_IndexedExpr):
         else:
             return set()
 
-    def _diff(self, target: _TensorIndexing) -> _IndexedExpr:
+    def _signless_diff(self, target: _TensorIndexing) -> _IndexedExpr:
         indices_list = [self.i1, self.i2]
         _check_indices_diff(indices_list, target.indices)
         new_indices = indices_list + target.indices
@@ -417,11 +428,11 @@ class _TensorIndexing(_IndexedExpr):
     def get_dummy_indices(self) -> set[Index]:
         return _get_dummy_indices(self.indices)
 
-    def _diff(self, target: _TensorIndexing) -> _IndexedExpr:
+    def _signless_diff(self, target: _TensorIndexing) -> _IndexedExpr:
         _check_indices_diff(self.indices, target.indices)
         if target.tensor == self.tensor:
             if self.tensor.rank == 0:
-                return _One()
+                return _ImplicitScalar(1)
             expr: _IndexedExpr = Delta(self.indices[0], target.indices[0])
             for i, j in zip(self.indices[1:], target.indices[1:]):
                 expr = expr * Delta(i, j)
@@ -537,6 +548,15 @@ class _Zero(_Tensor):
         return "0"
 
 
+def is_one(expr: _IndexedExpr) -> bool:
+    return isinstance(expr, _ImplicitScalar) and expr.num() == 1
+
+
+def is_zero(expr: _IndexedExpr) -> bool:
+    return isinstance(expr, _TensorIndexing) and isinstance(expr.tensor, _Zero)
+
+
+
 # TODO: Convert to _One if 1 is passed
 class _ImplicitScalar(_TensorIndexing):
     class Tensor(_Tensor):
@@ -554,7 +574,6 @@ class _ImplicitScalar(_TensorIndexing):
             sign = _Sign.Minus
         super().__init__(self.Tensor(num), [], sign)
 
-
-class _One(_ImplicitScalar):
-    def __init__(self) -> None:
-        super().__init__(1)
+    def num(self) -> int | float:
+        assert isinstance(self.tensor, _ImplicitScalar.Tensor)
+        return self.tensor.num
