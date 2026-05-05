@@ -80,17 +80,22 @@ class _Sign(StrEnum):
     Plus = "+"
     Minus = "-"
 
+    def flip(self) -> _Sign:
+        if self == _Sign.Minus:
+            return _Sign.Plus
+        elif self == _Sign.Plus:
+            return _Sign.Minus
+        else:
+            raise ValueError("Unreachable")
+
 
 class _IndexedExpr(ABC):
     def __init__(self, sign: _Sign = _Sign.Plus):
         self.sign = sign
 
     def __neg__(self) -> _IndexedExpr:
-        new_sign = _Sign.Minus
-        if self.sign == _Sign.Minus:
-            new_sign = _Sign.Plus
         new_expr = copy.copy(self)
-        new_expr.sign = new_sign
+        new_expr.sign = self.sign.flip()
         return new_expr
 
     @abstractmethod
@@ -117,7 +122,7 @@ class _IndexedExpr(ABC):
         return _Sum.create(self, other)
 
     def __sub__(self, other: "_IndexedExpr") -> "_IndexedExpr":
-        other.__neg__()
+        other = -other
         return _Sum.create(self, other)
 
     @abstractmethod
@@ -135,17 +140,25 @@ class _IndexedExpr(ABC):
     def simplify_deltas(self) -> None:
         pass
 
-    def add_sign(self, expr: str) -> "str":
+    def add_sign(self, expr: str, wrap_brackets: bool) -> "str":
         if self.sign == _Sign.Plus:
             return expr
         else:
-            return f"-({expr})"
+            if wrap_brackets:
+                return f"- ({expr})"
+            else:
+                return f"- {expr}"
 
 
 class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
     def __init__(self, operands: list[_IndexedExpr]):
         self.operands = operands
-        super().__init__()
+        net_sign = _Sign.Plus
+        for o in self.operands:
+            if o.sign == _Sign.Minus:
+                o.sign = _Sign.Plus
+                net_sign = net_sign.flip()
+        super().__init__(net_sign)
 
     @classmethod
     def create(cls, lhs: _IndexedExpr, rhs: _IndexedExpr) -> _IndexedExpr:
@@ -211,7 +224,7 @@ class _Product(_IndexedExpr, metaclass=utils.NoPublicConstructor):
         )
 
     def __str__(self) -> str:
-        return self.add_sign(" * ".join([str(op) for op in self.operands]))
+        return self.add_sign(" * ".join([str(op) for op in self.operands]), False)
 
     def replace_indices(self, replacements: dict[Index, Index]) -> None:
         for o in self.operands:
@@ -319,7 +332,13 @@ class _Sum(_IndexedExpr, metaclass=utils.NoPublicConstructor):
         )
 
     def __str__(self) -> str:
-        return self.add_sign(" + ".join([str(op) for op in self.operands]))
+        ret = str(self.operands[0])
+        for op in self.operands[1:]:
+            if op.sign == _Sign.Plus:
+                ret += f" + {op}"
+            else:
+                ret += f" {op}"
+        return self.add_sign(ret, True)
 
     def replace_indices(self, replacements: dict[Index, Index]) -> None:
         for o in self.operands:
@@ -356,7 +375,7 @@ class Delta(_IndexedExpr):
         return _make_indexed(_Zero, new_indices)
 
     def __str__(self) -> str:
-        return self.add_sign(f"delta({self.i1}, {self.i2})")
+        return self.add_sign(f"delta({self.i1}, {self.i2})", False)
 
     def get_children(self) -> list[_IndexedExpr]:
         return []
@@ -378,7 +397,9 @@ class _TensorIndexing(_IndexedExpr):
     tensor: _Tensor
     indices: list[Index]
 
-    def __init__(self, tensor: _Tensor, indices: list[Index]) -> None:
+    def __init__(
+        self, tensor: _Tensor, indices: list[Index], sign: _Sign = _Sign.Plus
+    ) -> None:
         assert (
             len(indices) == tensor.rank
         ), f"Index count({len(indices)}) doesn't match rank({tensor.rank})"
@@ -388,7 +409,7 @@ class _TensorIndexing(_IndexedExpr):
                 raise ValueError(f"Index {i} appears more the 2 times")
         self.tensor = tensor
         self.indices = indices
-        super().__init__()
+        super().__init__(sign)
 
     def get_free_indices(self) -> set[Index]:
         return _get_free_indices(self.indices)
@@ -412,10 +433,10 @@ class _TensorIndexing(_IndexedExpr):
     def __str__(self) -> str:
         if self.indices:
             return self.add_sign(
-                f"{self.tensor}[{",".join([str(i) for i in self.indices])}]"
+                f"{self.tensor}[{",".join([str(i) for i in self.indices])}]", False
             )
         else:
-            return self.add_sign(str(self.tensor))
+            return self.add_sign(str(self.tensor), False)
 
     def get_children(self) -> list[_IndexedExpr]:
         return []
@@ -527,7 +548,11 @@ class _ImplicitScalar(_TensorIndexing):
             return str(self.num)
 
     def __init__(self, num: int | float) -> None:
-        super().__init__(self.Tensor(num), [])
+        sign = _Sign.Plus
+        if num < 0:
+            num = -num
+            sign = _Sign.Minus
+        super().__init__(self.Tensor(num), [], sign)
 
 
 class _One(_ImplicitScalar):

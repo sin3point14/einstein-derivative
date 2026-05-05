@@ -2,26 +2,32 @@ from derivator import *
 
 
 def test_matmul() -> None:
+    print("Test matmul")
     A, x = Matrix("A"), Vector("x")
     i, j, k = Index("i"), Index("j"), Index("k")  # can we reuse j?
 
     y = A[i, j] * x[j]
     print(diff(y, x[k]))
+    print()
 
 
 def test_scalar() -> None:
+    print("Test scalar")
     a, x = Scalar("a"), Scalar("x")
     y = a * x
 
     print(diff(y, x))
+    print()
 
 
 def test_dot_prod() -> None:
+    print("Test dot prod")
     a, x = Vector("a"), Vector("x")
     i, j = Index("i"), Index("j")
     y = a[i] * x[i]
 
     print(diff(y, x[j]))
+    print()
 
 
 # def test_stvk_green_strain() -> None:
@@ -39,9 +45,24 @@ def test_dot_prod() -> None:
 
 
 def test_sign() -> None:
-    a = Scalar("a")
-    x = -(a)
+    a, b = Scalar("a"), Scalar("b")
+    x = b * -(a)
+    print("Test sign")
     print(x)
+    print(diff(x, a))
+    x = b - -a
+    print(x)
+    print(diff(x, a))
+    x = b * -2
+    print(x)
+    print(diff(x, b))
+    x = -a - b
+    print(x)
+    print(diff(x, a))
+    x = -(-a - b)
+    print(x)
+    print(diff(x, b))
+    print()
 
 
 test_matmul()
