@@ -49,11 +49,23 @@ def test_stvk_green_strain() -> None:
     e = Index("e")
     E[a, c] = 0.5 * (F[e, a] * F[e, c] - Delta(a, c))
 
-    i, j, k, l = Index("i"), Index("j"), Index("k"), Index("l")
+    i, j, k, l, m, n = (
+        Index("i"),
+        Index("j"),
+        Index("k"),
+        Index("l"),
+        Index("m"),
+        Index("n"),
+    )
     psi[()] = mu * E[i, j] * E[i, j] + 0.5 * lambda_ * E[i, i] * E[j, j]
 
-    print_diff(psi.diff(F[k, l]))
-    # print_diff(diff(psi, X[k, l]))
+    dpsi = psi.diff(X[k, l])
+    print("Test Stvk")
+    print("dpsi")
+    print_diff(dpsi)
+    print("d2psi")
+    print_diff(dpsi[-1].diff(X[m, n], dpsi))
+    print()
 
 
 def test_sign() -> None:
@@ -77,8 +89,8 @@ def test_sign() -> None:
     print()
 
 
-# test_matmul()
-# test_scalar()
-# test_dot_prod()
+test_matmul()
+test_scalar()
+test_dot_prod()
 test_stvk_green_strain()
-# test_sign()
+test_sign()
